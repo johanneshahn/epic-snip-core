@@ -426,6 +426,81 @@ pub fn build_bob_claim_transaction(
     ))
 }
 
+/// Builds Alice's funding transaction for a shared receipt output from one
+/// known existing input.
+///
+/// This is deliberately a narrow research helper, not a wallet coin-selection
+/// API. The caller owns and supplies the input blind and amount. The resulting
+/// transaction has a regular funding kernel, while the later Bob transaction
+/// carries the `BobClaim` receipt kernel.
+pub fn build_receipt_funding_transaction(
+    input: Input,
+    input_value: u64,
+    input_blind: &SecretKey,
+    shared_blind: &SecretKey,
+    receipt_key_hashes: SharedReceiptKeyHashes,
+    receipt_stealth_hint: ReceiptStealthHint,
+    fee: u64,
+    secp: &secp::Secp256k1,
+) -> Result<Transaction, ser::Error> {
+    if input.features.is_receipt() {
+        return Err(ser::Error::CorruptedData);
+    }
+    let expected_input = secp
+        .commit(input_value, input_blind.clone())
+        .map_err(|_| ser::Error::CorruptedData)?;
+    if expected_input != input.commit {
+        return Err(ser::Error::CorruptedData);
+    }
+    let receipt_value = input_value
+        .checked_sub(fee)
+        .ok_or(ser::Error::CorruptedData)?;
+    let receipt_output = build_shared_receipt_output(
+        receipt_value,
+        shared_blind,
+        receipt_key_hashes,
+        receipt_stealth_hint,
+        secp,
+    )?;
+
+    // `outputs + fee - inputs` is the excess: b_shared - b_input.
+    let kernel_secret = secp
+        .blind_sum(vec![shared_blind.clone()], vec![input_blind.clone()])
+        .map_err(|_| ser::Error::CorruptedData)?;
+    let features = KernelFeatures::Plain { fee };
+    let excess = secp
+        .commit(0, kernel_secret.clone())
+        .map_err(|_| ser::Error::CorruptedData)?;
+    let message = features
+        .kernel_sig_msg()
+        .map_err(|_| ser::Error::CorruptedData)?;
+    let excess_public_key = excess
+        .to_pubkey(secp)
+        .map_err(|_| ser::Error::CorruptedData)?;
+    let excess_sig = secp::aggsig::sign_single(
+        secp,
+        &message,
+        &kernel_secret,
+        None,
+        None,
+        None,
+        Some(&excess_public_key),
+        None,
+    )
+    .map_err(|_| ser::Error::CorruptedData)?;
+
+    Ok(Transaction::new(
+        vec![input],
+        vec![receipt_output],
+        vec![TxKernel {
+            features,
+            excess,
+            excess_sig,
+            receipt_claim: None,
+        }],
+    ))
+}
+
 fn shared_rewind_nonce(
     secp: &secp::Secp256k1,
     shared_blind: &SecretKey,

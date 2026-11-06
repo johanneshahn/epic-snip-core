@@ -261,6 +261,8 @@ where
 				features: OutputFeatures::Plain,
 				commit: commit,
 				proof: proof,
+				receipt_key_hashes: None,
+				receipt_stealth_hint: None,
 			};
 
 			// we return the output and the value is subtracted instead of added
