@@ -24,6 +24,8 @@ pub mod hash;
 pub mod id;
 pub mod merkle_proof;
 pub mod pmmr;
+#[path = "receipt_claim.rs"]
+pub mod receipt_claim;
 pub mod transaction;
 
 use crate::consensus::EPIC_BASE;
@@ -35,6 +37,7 @@ pub use self::block_sums::*;
 pub use self::committed::Committed;
 pub use self::compact_block::*;
 pub use self::id::ShortId;
+pub use self::receipt_claim::*;
 pub use self::transaction::*;
 use thiserror::Error; // <-- Add this
 /// Common errors

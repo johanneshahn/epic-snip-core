@@ -961,7 +961,9 @@ impl<'a> Extension<'a> {
 		if let Ok((pos, height)) = batch.get_output_pos_height(&commit) {
 			// First check this input corresponds to an existing entry in the output MMR.
 			if let Some(hash) = self.output_pmmr.get_hash(pos) {
-				if hash != input.hash_with_index(pos - 1) {
+				// Match the complete serialized output identity, including receipt
+				// authorization hashes for experimental Usernet receipt outputs.
+				if hash != OutputIdentifier::from_input(input).hash_with_index(pos - 1) {
 					return Err(Error::TxHashSetErr("output pmmr hash mismatch".to_string()).into());
 				}
 			}

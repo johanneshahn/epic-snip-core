@@ -1293,6 +1293,8 @@ impl Chain {
 				commit: x.commit,
 				features: x.features,
 				proof: y,
+				receipt_key_hashes: x.receipt_key_hashes,
+				receipt_stealth_hint: x.receipt_stealth_hint,
 			});
 		}
 		Ok((outputs.0, last_index, output_vec))

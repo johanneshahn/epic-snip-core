@@ -16,7 +16,7 @@
 
 use crate::core::core::hash::{Hash, Hashed};
 use crate::core::core::pmmr::{self, ReadonlyPMMR};
-use crate::core::core::{Block, BlockHeader, Input, Output, Transaction};
+use crate::core::core::{Block, BlockHeader, Input, Output, OutputIdentifier, Transaction};
 use crate::core::global;
 use crate::core::ser::PMMRIndexHashable;
 use crate::error::Error;
@@ -79,7 +79,10 @@ impl<'a> UTXOView<'a> {
 	fn validate_input(&self, input: &Input, batch: &Batch<'_>) -> Result<(), Error> {
 		if let Ok(pos) = batch.get_output_pos(&input.commitment()) {
 			if let Some(hash) = self.output_pmmr.get_hash(pos) {
-				if hash == input.hash_with_index(pos - 1) {
+				// Receipt output key hashes are part of OutputIdentifier serialization.
+				// Rebuild the exact identifier from the input so a commitment alone can
+				// never spend a receipt output with altered authorization metadata.
+				if hash == OutputIdentifier::from_input(input).hash_with_index(pos - 1) {
 					return Ok(());
 				}
 			}
