@@ -298,7 +298,7 @@ where
 mod test {
 
     use super::*;
-    use crate::core::{ReceiptPath, SharedReceiptKeyHashes, StealthReceiptSecrets};
+    use crate::core::{SharedReceiptKeyHashes, StealthReceiptSecrets};
     use crate::core::transaction::Weighting;
     use crate::libtx::ProofBuilder;
     use keychain::{ExtKeychain, ExtKeychainPath};
@@ -337,8 +337,9 @@ mod test {
         let ephemeral = util::secp::key::SecretKey::new(&secp, &mut rand::rng());
         let (hint, bob_key) = descriptor.derive_for_sender(&ephemeral, &secp).unwrap();
         let alice_key = util::secp::key::SecretKey::new(&secp, &mut rand::rng());
-        let alice_public = util::secp::key::PublicKey::from_secret_key(&secp, &alice_key).unwrap();
-        let hashes = SharedReceiptKeyHashes::from_public_keys(&alice_public, &bob_key);
+        let alice_public_key =
+            util::secp::key::PublicKey::from_secret_key(&secp, &alice_key).unwrap();
+        let hashes = SharedReceiptKeyHashes::from_public_keys(&bob_key, &alice_public_key);
 
         let tx = transaction(
             KernelFeatures::Plain { fee: 2 },
@@ -351,7 +352,7 @@ mod test {
         assert_eq!(output.features, OutputFeatures::Receipt);
         assert_eq!(output.receipt_key_hashes, Some(hashes));
         assert_eq!(output.receipt_stealth_hint, Some(hint));
-        assert!(hashes.matches(ReceiptPath::BobClaim, &bob_key));
+        assert!(hashes.matches_bob(&bob_key));
     }
 
     #[test]

@@ -16,7 +16,8 @@
 
 use crate::core::hash::{DefaultHashable, Hashed};
 use crate::core::receipt_claim::{
-    ReceiptClaim, ReceiptPath, ReceiptStealthHint, SharedReceiptKeyHashes,
+    ReceiptClaim, ReceiptPath, ReceiptSpendAuthorization, ReceiptStealthHint,
+    SharedReceiptKeyHashes,
 };
 use crate::core::{committed, Committed};
 use crate::libtx::secp_ser;
@@ -53,8 +54,6 @@ pub enum KernelFeatures {
         /// Height locked kernels have lock heights.
         lock_height: u64,
     },
-    /// Experimental Usernet-only kernel resolving a shared receipt output to Alice.
-    AliceReclaim { fee: u64 },
     /// Experimental Usernet-only kernel resolving a shared receipt output to Bob.
     BobClaim { fee: u64 },
 }
@@ -63,8 +62,7 @@ impl KernelFeatures {
     const PLAIN_U8: u8 = 0;
     const COINBASE_U8: u8 = 1;
     const HEIGHT_LOCKED_U8: u8 = 2;
-    const ALICE_RECLAIM_U8: u8 = 3;
-    const BOB_CLAIM_U8: u8 = 4;
+    const BOB_CLAIM_U8: u8 = 3;
 
     /// Underlying (u8) value representing this kernel variant.
     /// This is the first byte when we serialize/deserialize the kernel features.
@@ -73,7 +71,6 @@ impl KernelFeatures {
             KernelFeatures::Plain { .. } => KernelFeatures::PLAIN_U8,
             KernelFeatures::Coinbase => KernelFeatures::COINBASE_U8,
             KernelFeatures::HeightLocked { .. } => KernelFeatures::HEIGHT_LOCKED_U8,
-            KernelFeatures::AliceReclaim { .. } => KernelFeatures::ALICE_RECLAIM_U8,
             KernelFeatures::BobClaim { .. } => KernelFeatures::BOB_CLAIM_U8,
         }
     }
@@ -84,7 +81,6 @@ impl KernelFeatures {
             KernelFeatures::Plain { .. } => String::from("Plain"),
             KernelFeatures::Coinbase => String::from("Coinbase"),
             KernelFeatures::HeightLocked { .. } => String::from("HeightLocked"),
-            KernelFeatures::AliceReclaim { .. } => String::from("AliceReclaim"),
             KernelFeatures::BobClaim { .. } => String::from("BobClaim"),
         }
     }
@@ -94,7 +90,6 @@ impl KernelFeatures {
         match self {
             KernelFeatures::Plain { fee }
             | KernelFeatures::HeightLocked { fee, .. }
-            | KernelFeatures::AliceReclaim { fee }
             | KernelFeatures::BobClaim { fee } => *fee,
             KernelFeatures::Coinbase => 0,
         }
@@ -109,7 +104,7 @@ impl KernelFeatures {
             KernelFeatures::Plain { fee } => (x, fee).hash(),
             KernelFeatures::Coinbase => (x).hash(),
             KernelFeatures::HeightLocked { fee, lock_height } => (x, fee, lock_height).hash(),
-            KernelFeatures::AliceReclaim { fee } | KernelFeatures::BobClaim { fee } => {
+            KernelFeatures::BobClaim { fee } => {
                 (x, fee).hash()
             }
         };
@@ -125,7 +120,7 @@ impl KernelFeatures {
             KernelFeatures::Plain { fee } => (*fee, 0),
             KernelFeatures::Coinbase => (0, 0),
             KernelFeatures::HeightLocked { fee, lock_height } => (*fee, *lock_height),
-            KernelFeatures::AliceReclaim { fee } | KernelFeatures::BobClaim { fee } => (*fee, 0),
+            KernelFeatures::BobClaim { fee } => (*fee, 0),
         };
         writer.write_u8(self.as_u8())?;
         writer.write_u64(fee)?;
@@ -151,7 +146,7 @@ impl KernelFeatures {
                 writer.write_u64(*fee)?;
                 writer.write_u64(*lock_height)?;
             }
-            KernelFeatures::AliceReclaim { fee } | KernelFeatures::BobClaim { fee } => {
+            KernelFeatures::BobClaim { fee } => {
                 writer.write_u8(self.as_u8())?;
                 writer.write_u64(*fee)?;
             }
@@ -184,12 +179,6 @@ impl KernelFeatures {
                 KernelFeatures::Coinbase
             }
             KernelFeatures::HEIGHT_LOCKED_U8 => KernelFeatures::HeightLocked { fee, lock_height },
-            KernelFeatures::ALICE_RECLAIM_U8 => {
-                if lock_height != 0 {
-                    return Err(ser::Error::CorruptedData);
-                }
-                KernelFeatures::AliceReclaim { fee }
-            }
             KernelFeatures::BOB_CLAIM_U8 => {
                 if lock_height != 0 {
                     return Err(ser::Error::CorruptedData);
@@ -216,10 +205,6 @@ impl KernelFeatures {
                 let fee = reader.read_u64()?;
                 let lock_height = reader.read_u64()?;
                 KernelFeatures::HeightLocked { fee, lock_height }
-            }
-            KernelFeatures::ALICE_RECLAIM_U8 => {
-                let fee = reader.read_u64()?;
-                KernelFeatures::AliceReclaim { fee }
             }
             KernelFeatures::BOB_CLAIM_U8 => {
                 let fee = reader.read_u64()?;
@@ -430,16 +415,12 @@ impl KernelFeatures {
 
     /// Is this an experimental Usernet receipt-resolution kernel?
     pub fn is_receipt_resolution(&self) -> bool {
-        matches!(
-            self,
-            KernelFeatures::AliceReclaim { .. } | KernelFeatures::BobClaim { .. }
-        )
+        matches!(self, KernelFeatures::BobClaim { .. })
     }
 
     /// The path authorized by this receipt-resolution feature.
     pub fn receipt_path(&self) -> Option<ReceiptPath> {
         match self {
-            KernelFeatures::AliceReclaim { .. } => Some(ReceiptPath::AliceReclaim),
             KernelFeatures::BobClaim { .. } => Some(ReceiptPath::BobClaim),
             _ => None,
         }
@@ -760,7 +741,6 @@ impl TransactionBody {
                 KernelFeatures::Coinbase => None,
                 KernelFeatures::Plain { fee }
                 | KernelFeatures::HeightLocked { fee, .. }
-                | KernelFeatures::AliceReclaim { fee }
                 | KernelFeatures::BobClaim { fee } => Some(fee),
             })
             .fold(0, |acc, fee| acc.saturating_add(fee))
@@ -915,6 +895,19 @@ impl TransactionBody {
         Ok(())
     }
 
+    /// Validates receipt resolution rules for this transaction body.
+    ///
+    /// **Step 3C note (deferred):** The current rule counts only `BobClaim`
+    /// kernels. A `Receipt` input that carries an Alice
+    /// [`ReceiptSpendAuthorization`](crate::receipt_claim::ReceiptSpendAuthorization)
+    /// alongside a `BobClaim` kernel would still satisfy this count rule.
+    /// Step 3C must add an explicit mixed-path rejection: a transaction may
+    /// not combine an Alice-authorized input with a `BobClaim` kernel.
+    ///
+    /// Similarly, multiple `Receipt` inputs with multiple kernels are not
+    /// matched one-to-one here; Step 3C must enforce a per-input/per-kernel
+    /// mapping to prevent duplicate kernel hashes, kernel substitution,
+    /// reordering, and authorization reuse.
     fn verify_receipt_resolution(&self) -> Result<(), Error> {
         for input in &self.inputs {
             let valid_metadata = match (
@@ -926,6 +919,13 @@ impl TransactionBody {
                 _ => false,
             };
             if !valid_metadata {
+                return Err(Error::InvalidReceiptClaim);
+            }
+            // The input-level Alice spend authorization may only be carried by
+            // a receipt input. Ordinary inputs carrying it are rejected; this
+            // is a structural rule and is enforced independently of the
+            // (still disabled) Alice-spend consensus rule.
+            if input.receipt_spend_authorization.is_some() && !input.features.is_receipt() {
                 return Err(Error::InvalidReceiptClaim);
             }
             if let Some(hint) = input.receipt_stealth_hint {
@@ -988,7 +988,7 @@ impl TransactionBody {
                 .as_ref()
                 .ok_or(Error::InvalidReceiptClaim)?;
             let hashes = input.receipt_key_hashes.ok_or(Error::InvalidReceiptClaim)?;
-            if !hashes.matches(claim.path, &claim.receipt_public_key) {
+            if !hashes.matches_bob(&claim.receipt_public_key) {
                 return Err(Error::InvalidReceiptClaim);
             }
         }
@@ -1436,6 +1436,17 @@ pub struct Input {
     pub receipt_key_hashes: Option<SharedReceiptKeyHashes>,
     /// One-time stealth scan hint for an experimental receipt output.
     pub receipt_stealth_hint: Option<ReceiptStealthHint>,
+    /// Alice's independent spend authorization, present only on inputs that
+    /// spend an experimental receipt output. Carrying this on any other input
+    /// is rejected at deserialization.
+    ///
+    /// **Step 3C note:** The presence byte changes the `DefaultHashable` hash
+    /// of a `Receipt` input (both `None` and `Some` variants differ from the
+    /// pre-Step-3B hash). This incidentally breaks generic cut-through from
+    /// `Receipt` inputs to `Receipt` outputs. Step 3C must make cut-through
+    /// explicitly receipt-aware; Step 3B does not rely on this accidental
+    /// hash difference for security.
+    pub receipt_spend_authorization: Option<ReceiptSpendAuthorization>,
 }
 
 impl DefaultHashable for Input {}
@@ -1462,6 +1473,11 @@ impl Writeable for Input {
             self.receipt_stealth_hint
                 .ok_or(ser::Error::CorruptedData)?
                 .write(writer)?;
+            let present = self.receipt_spend_authorization.is_some() as u8;
+            writer.write_u8(present)?;
+            if let Some(authorization) = self.receipt_spend_authorization {
+                authorization.write(writer)?;
+            }
         }
         Ok(())
     }
@@ -1473,21 +1489,28 @@ impl Readable for Input {
     fn read(reader: &mut dyn Reader) -> Result<Input, ser::Error> {
         let features = OutputFeatures::read(reader)?;
         let commit = Commitment::read(reader)?;
-        let receipt_key_hashes = if features.is_receipt() {
-            Some(SharedReceiptKeyHashes::read(reader)?)
-        } else {
-            None
-        };
-        let receipt_stealth_hint = if features.is_receipt() {
-            Some(ReceiptStealthHint::read(reader)?)
-        } else {
-            None
-        };
+        let mut receipt_key_hashes = None;
+        let mut receipt_stealth_hint = None;
+        let mut receipt_spend_authorization = None;
+        if features.is_receipt() {
+            receipt_key_hashes = Some(SharedReceiptKeyHashes::read(reader)?);
+            receipt_stealth_hint = Some(ReceiptStealthHint::read(reader)?);
+            let present = reader.read_u8()?;
+            if present != 0 && present != 1 {
+                return Err(ser::Error::CorruptedData);
+            }
+            receipt_spend_authorization = if present == 1 {
+                Some(ReceiptSpendAuthorization::read(reader)?)
+            } else {
+                None
+            };
+        }
         Ok(Input {
             features,
             commit,
             receipt_key_hashes,
             receipt_stealth_hint,
+            receipt_spend_authorization,
         })
     }
 }
@@ -1505,6 +1528,7 @@ impl Input {
             commit,
             receipt_key_hashes: None,
             receipt_stealth_hint: None,
+            receipt_spend_authorization: None,
         }
     }
 
@@ -1845,26 +1869,21 @@ mod test {
     use util::secp;
 
     fn receipt_kernel(
-        path: ReceiptPath,
     ) -> (TxKernel, SharedReceiptKeyHashes, ReceiptStealthHint) {
         let secp = secp::Secp256k1::with_caps(secp::ContextFlag::Commit);
         let mut rng = rand::rng();
         let kernel_key = secp::key::SecretKey::new(&secp, &mut rng);
         let receipt_key = secp::key::SecretKey::new(&secp, &mut rng);
-        let other_receipt_key = secp::key::SecretKey::new(&secp, &mut rng);
         let receipt_public_key = secp::key::PublicKey::from_secret_key(&secp, &receipt_key).unwrap();
-        let other_receipt_public_key =
-            secp::key::PublicKey::from_secret_key(&secp, &other_receipt_key).unwrap();
+        let alice_key = secp::key::SecretKey::new(&secp, &mut rng);
+        let alice_public_key = secp::key::PublicKey::from_secret_key(&secp, &alice_key).unwrap();
         let hint_key = secp::key::SecretKey::new(&secp, &mut rng);
         let hint_public_key = secp::key::PublicKey::from_secret_key(&secp, &hint_key).unwrap();
         let hint = ReceiptStealthHint::from_public_key(&hint_public_key, &secp);
         let original = secp
             .commit(10, secp::key::SecretKey::new(&secp, &mut rng))
             .unwrap();
-        let features = match path {
-            ReceiptPath::AliceReclaim => KernelFeatures::AliceReclaim { fee: 2 },
-            ReceiptPath::BobClaim => KernelFeatures::BobClaim { fee: 2 },
-        };
+        let features = KernelFeatures::BobClaim { fee: 2 };
         let excess = secp.commit(0, kernel_key.clone()).unwrap();
         let message = features.kernel_sig_msg().unwrap();
         let pubkey = excess.to_pubkey(&secp).unwrap();
@@ -1879,15 +1898,9 @@ mod test {
             None,
         )
         .unwrap();
-        let receipt_claim = ReceiptClaim::sign(path, original, excess, 2, &receipt_key).unwrap();
-        let hashes = match path {
-            ReceiptPath::AliceReclaim => {
-                SharedReceiptKeyHashes::from_public_keys(&receipt_public_key, &other_receipt_public_key)
-            }
-            ReceiptPath::BobClaim => {
-                SharedReceiptKeyHashes::from_public_keys(&other_receipt_public_key, &receipt_public_key)
-            }
-        };
+        let receipt_claim = ReceiptClaim::sign(ReceiptPath::BobClaim, original, excess, 2, &receipt_key).unwrap();
+        let hashes =
+            SharedReceiptKeyHashes::from_public_keys(&receipt_public_key, &alice_public_key);
         (
             TxKernel {
                 features,
@@ -1952,12 +1965,8 @@ mod test {
 
     #[test]
     fn receipt_resolution_kernel_requires_a_matching_receipt() {
-        let (kernel, _, _) = receipt_kernel(ReceiptPath::BobClaim);
+        let (kernel, _, _) = receipt_kernel();
         assert!(kernel.verify().is_ok());
-
-        let mut wrong_path = kernel.clone();
-        wrong_path.receipt_claim.as_mut().unwrap().path = ReceiptPath::AliceReclaim;
-        assert_eq!(wrong_path.verify(), Err(Error::InvalidReceiptClaim));
 
         let mut wrong_fee = kernel.clone();
         wrong_fee.receipt_claim.as_mut().unwrap().fee = 3;
@@ -1966,7 +1975,7 @@ mod test {
 
     #[test]
     fn receipt_resolution_kernel_binary_roundtrip() {
-        let (kernel, _, _) = receipt_kernel(ReceiptPath::AliceReclaim);
+        let (kernel, _, _) = receipt_kernel();
         let mut bytes = vec![];
         ser::serialize_default(&mut bytes, &kernel).unwrap();
         let decoded: TxKernel = ser::deserialize_default(&mut &bytes[..]).unwrap();
@@ -1977,18 +1986,19 @@ mod test {
 
     #[test]
     fn receipt_input_requires_its_own_matching_resolution_kernel() {
-        let (kernel, hashes, hint) = receipt_kernel(ReceiptPath::BobClaim);
+        let (kernel, hashes, hint) = receipt_kernel();
         let original_commitment = kernel.receipt_claim.as_ref().unwrap().original_commitment;
         let input = Input {
             features: OutputFeatures::Receipt,
             commit: original_commitment,
             receipt_key_hashes: Some(hashes),
             receipt_stealth_hint: Some(hint),
+            receipt_spend_authorization: None,
         };
         let body = TransactionBody::init(vec![input], vec![], vec![kernel], false).unwrap();
         assert!(body.verify_receipt_resolution().is_ok());
 
-        let (kernel, mut hashes, hint) = receipt_kernel(ReceiptPath::BobClaim);
+        let (kernel, mut hashes, hint) = receipt_kernel();
         let original_commitment = kernel.receipt_claim.as_ref().unwrap().original_commitment;
         hashes.bob = [0; 32];
         let invalid_body = TransactionBody::init(
@@ -1997,6 +2007,7 @@ mod test {
                 commit: original_commitment,
                 receipt_key_hashes: Some(hashes),
                 receipt_stealth_hint: Some(hint),
+                receipt_spend_authorization: None,
             }],
             vec![],
             vec![kernel],
@@ -2011,7 +2022,7 @@ mod test {
 
     #[test]
     fn receipt_input_must_match_the_full_utxo_identifier() {
-        let (_, hashes, hint) = receipt_kernel(ReceiptPath::BobClaim);
+        let (_, hashes, hint) = receipt_kernel();
         let secp = secp::Secp256k1::with_caps(secp::ContextFlag::Commit);
         let commitment = secp
             .commit(10, secp::key::SecretKey::new(&secp, &mut rand::rng()))
@@ -2027,8 +2038,11 @@ mod test {
             commit: commitment,
             receipt_key_hashes: Some(hashes),
             receipt_stealth_hint: Some(hint),
+            receipt_spend_authorization: None,
         };
-        assert_eq!(output_id.hash_with_index(0), input.hash_with_index(0));
+        let input_output_id = OutputIdentifier::from_input(&input);
+        assert_eq!(output_id, input_output_id);
+        assert_eq!(output_id.hash_with_index(0), input_output_id.hash_with_index(0));
 
         let mut forged_input = input;
         forged_input.receipt_key_hashes.as_mut().unwrap().bob = [0; 32];
@@ -2068,6 +2082,7 @@ mod test {
             commit,
             receipt_key_hashes: None,
             receipt_stealth_hint: None,
+            receipt_spend_authorization: None,
         };
 
         let block_hash =
@@ -2086,6 +2101,7 @@ mod test {
             commit,
             receipt_key_hashes: None,
             receipt_stealth_hint: None,
+            receipt_spend_authorization: None,
         };
 
         let short_id = input.short_id(&block_hash, nonce);
@@ -2116,17 +2132,12 @@ mod test {
         );
 
         let mut vec = vec![];
-        ser::serialize_default(&mut vec, &(3u8, 0u64, 0u64)).expect("serialized failed");
-        let features: KernelFeatures = ser::deserialize_default(&mut &vec[..]).unwrap();
-        assert_eq!(features, KernelFeatures::AliceReclaim { fee: 0 });
-
-        let mut vec = vec![];
-        ser::serialize_default(&mut vec, &(4u8, 10u64, 0u64)).expect("serialized failed");
+        ser::serialize_default(&mut vec, &(3u8, 10u64, 0u64)).expect("serialized failed");
         let features: KernelFeatures = ser::deserialize_default(&mut &vec[..]).unwrap();
         assert_eq!(features, KernelFeatures::BobClaim { fee: 10 });
 
         let mut vec = vec![];
-        ser::serialize_default(&mut vec, &(5u8, 0u64, 0u64)).expect("serialized failed");
+        ser::serialize_default(&mut vec, &(4u8, 0u64, 0u64)).expect("serialized failed");
         let res: Result<KernelFeatures, _> = ser::deserialize_default(&mut &vec[..]);
         assert_eq!(res.err(), Some(ser::Error::CorruptedData));
     }

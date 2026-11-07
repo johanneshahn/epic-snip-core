@@ -239,6 +239,8 @@ pub fn verify_partial_sig(
 ///		features: OutputFeatures::Coinbase,
 ///		commit: commit,
 ///		proof: rproof,
+///		receipt_key_hashes: None,
+///		receipt_stealth_hint: None,
 /// };
 /// let height = 20;
 /// let over_commit = secp.commit_value(reward(fees, height)).unwrap();

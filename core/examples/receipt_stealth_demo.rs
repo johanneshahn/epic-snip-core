@@ -28,10 +28,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let alice_ephemeral = key(&secp);
     let (hint, bob_receipt_public_key) =
         bob_descriptor.derive_for_sender(&alice_ephemeral, &secp)?;
-    let alice_reclaim_secret = key(&secp);
-    let alice_reclaim_public_key = PublicKey::from_secret_key(&secp, &alice_reclaim_secret)?;
-    let receipt_hashes =
-        SharedReceiptKeyHashes::from_public_keys(&alice_reclaim_public_key, &bob_receipt_public_key);
+    let alice_authorization_public_key = PublicKey::from_secret_key(&secp, &key(&secp))?;
+    let receipt_hashes = SharedReceiptKeyHashes::from_public_keys(
+        &bob_receipt_public_key,
+        &alice_authorization_public_key,
+    );
 
     // Bob sees the public hint during a scan and independently recovers b_i.
     let bob_receipt_secret =

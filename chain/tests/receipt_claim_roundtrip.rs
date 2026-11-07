@@ -21,7 +21,7 @@ use core::global::{self, ChainTypes};
 use core::pow;
 use keychain::{ExtKeychain, ExtKeychainPath, Keychain, SwitchCommitmentType};
 use util::secp;
-use util::secp::key::{PublicKey, SecretKey};
+use util::secp::key::SecretKey;
 
 fn key(secp: &secp::Secp256k1) -> SecretKey {
     SecretKey::new(secp, &mut rand::rng())
@@ -76,10 +76,11 @@ fn usernet_receipt_output_can_be_claimed_in_later_block() {
     let (hint, bob_receipt_public_key) = descriptor
         .derive_for_sender(&alice_ephemeral, secp)
         .unwrap();
-    let alice_reclaim_public_key = PublicKey::from_secret_key(secp, &key(secp)).unwrap();
+    let alice_authorization_public_key =
+        secp::key::PublicKey::from_secret_key(secp, &key(secp)).unwrap();
     let hashes = SharedReceiptKeyHashes::from_public_keys(
-        &alice_reclaim_public_key,
         &bob_receipt_public_key,
+        &alice_authorization_public_key,
     );
     let alice_shared_blind = descriptor
         .derive_shared_spend_blind_for_sender(&alice_ephemeral, secp)
