@@ -13,13 +13,14 @@ use crate::chain_test_helper::{
 };
 use epic_core as core;
 use epic_core::core::{
-    build_bob_claim_transaction, build_receipt_funding_transaction,
-    rewind_shared_receipt_output, Input, OutputFeatures, OutputIdentifier,
-    SharedReceiptKeyHashes, StealthReceiptSecrets,
+    build_alice_spend_transaction, build_bob_claim_transaction,
+    build_receipt_funding_transaction, rewind_shared_receipt_output, Input, OutputFeatures,
+    OutputIdentifier, SharedReceiptKeyHashes, StealthReceiptSecrets,
 };
 use epic_core::core::receipt_claim::{
-    ReceiptClaim, ReceiptPath, ReceiptStealthHint,
+    AliceReceiptAuthorizationKey, ReceiptChainId, ReceiptClaim, ReceiptPath, ReceiptStealthHint,
 };
+use epic_core::core::hash::Hashed;
 use epic_core::global::{self, ChainTypes};
 use epic_core::pow;
 use epic_keychain::{ExtKeychain, ExtKeychainPath, Keychain, SwitchCommitmentType};
@@ -103,6 +104,7 @@ struct ChainFixture {
     alice_shared_blind: SecretKey,
     bob_shared_blind: SecretKey,
     bob_receipt_key: SecretKey,
+    alice_authorization_key: AliceReceiptAuthorizationKey,
 }
 
 impl ChainFixture {
@@ -140,8 +142,8 @@ impl ChainFixture {
         let (hint, bob_receipt_public_key) = descriptor
             .derive_for_sender(&alice_ephemeral, secp)
             .unwrap();
-        let alice_authorization_public_key =
-            PublicKey::from_secret_key(secp, &key(secp)).unwrap();
+        let alice_authorization_key = AliceReceiptAuthorizationKey::generate(secp).unwrap();
+        let alice_authorization_public_key = *alice_authorization_key.public_key();
         let hashes = SharedReceiptKeyHashes::from_public_keys(
             &bob_receipt_public_key,
             &alice_authorization_public_key,
@@ -198,6 +200,7 @@ impl ChainFixture {
             alice_shared_blind,
             bob_shared_blind,
             bob_receipt_key,
+            alice_authorization_key,
         }
     }
 
@@ -1336,5 +1339,220 @@ fn experiment_c_full_chain_attribution_roundtrip() {
     chain.validate(false).unwrap();
 
     clean_output_dir(".spend_attr_c_full");
+}
+
+// ─── Step 3C: Chain-level consensus validation ───────────────────────────────
+
+/// Alice's reclaim via a Plain kernel with a valid AliceSpend authorization
+/// must be accepted by full consensus validation.
+#[test]
+fn step3c_alice_reclaim_via_plain_kernel_consensus_accepted() {
+    let fixture = ChainFixture::build(".spend_attr_3c_alice");
+
+    let dest_blind = key(fixture.secp());
+    let fee = 2;
+    let chain_id = {
+        let guard = global::CHAIN_TYPE.read();
+        ReceiptChainId::from_chain_type(&guard)
+    };
+
+    let spend_tx = build_alice_spend_transaction(
+        &fixture.receipt_output,
+        fixture.receipt_value,
+        &fixture.bob_shared_blind,
+        &fixture.alice_authorization_key,
+        &dest_blind,
+        fee,
+        chain_id,
+        fixture.secp(),
+    )
+    .unwrap();
+
+    // Full consensus validation including authorization check.
+    spend_tx
+        .validate(core::core::transaction::Weighting::AsTransaction)
+        .unwrap();
+
+    // Verify the authorization is present on the input.
+    let input = &spend_tx.inputs()[0];
+    assert!(input.features.is_receipt());
+    assert!(input.receipt_spend_authorization.is_some());
+
+    // The kernel is a Plain kernel (not BobClaim).
+    let kernel = &spend_tx.kernels()[0];
+    assert!(
+        matches!(kernel.features, core::core::KernelFeatures::Plain { .. }),
+        "AliceSpend must use a Plain kernel"
+    );
+    assert!(kernel.receipt_claim.is_none());
+
+    // The authorization must bind to the correct kernel hash.
+    let auth = input.receipt_spend_authorization.as_ref().unwrap();
+    assert_eq!(auth.kernel_hash, kernel.hash());
+    assert_eq!(auth.kernel_excess, kernel.excess);
+    assert_eq!(auth.fee, fee);
+
+    // Mine the spend into a block and validate the full chain.
+    let previous = fixture.chain.head_header().unwrap();
+    let block = prepare_block(
+        &fixture.keychain,
+        &previous,
+        &fixture.chain,
+        10,
+        vec![&spend_tx],
+        2,
+    );
+    process_block(&fixture.chain, &block);
+
+    // The receipt output is now spent; the destination is unspent.
+    let destination_id =
+        OutputIdentifier::from_output(&spend_tx.outputs()[0]);
+    assert!(fixture.chain.is_unspent(&destination_id).is_ok());
+
+    // Full chain validation.
+    fixture.chain.validate(false).unwrap();
+
+    clean_output_dir(".spend_attr_3c_alice");
+}
+
+/// A Plain spend of a receipt output WITHOUT a valid AliceSpend authorization
+/// (i.e. `receipt_spend_authorization: None`) must be rejected by consensus.
+#[test]
+fn step3c_unauthorized_plain_spend_of_receipt_rejected() {
+    let fixture = ChainFixture::build(".spend_attr_3c_unauth");
+
+    // Build a transaction identical to Alice's spend but with NO authorization.
+    let dest_blind = key(fixture.secp());
+    let dest_value = fixture.receipt_value;
+    let fee = 0;
+
+    let kernel_secret = fixture
+        .secp()
+        .blind_sum(
+            vec![dest_blind.clone()],
+            vec![fixture.bob_shared_blind.clone()],
+        )
+        .unwrap();
+    let features = core::core::KernelFeatures::Plain { fee };
+    let excess = fixture.secp().commit(0, kernel_secret.clone()).unwrap();
+    let message = features.kernel_sig_msg().unwrap();
+    let excess_public_key = excess.to_pubkey(fixture.secp()).unwrap();
+    let excess_sig = secp::aggsig::sign_single(
+        fixture.secp(),
+        &message,
+        &kernel_secret,
+        None,
+        None,
+        None,
+        Some(&excess_public_key),
+        None,
+    )
+    .unwrap();
+
+    let dest_commit = fixture
+        .secp()
+        .commit(dest_value, dest_blind.clone())
+        .unwrap();
+    let dest_proof = make_bullet_proof(fixture.secp(), dest_value, &dest_blind, &dest_commit);
+
+    // receipt_spend_authorization: None — this is the unauthorized case.
+    let input = core::core::Input {
+        features: OutputFeatures::Receipt,
+        commit: fixture.receipt_output.commit,
+        receipt_key_hashes: Some(fixture.hashes),
+        receipt_stealth_hint: Some(fixture.hint),
+        receipt_spend_authorization: None,
+    };
+    let output = core::core::Output {
+        features: OutputFeatures::Plain,
+        commit: dest_commit,
+        proof: dest_proof,
+        receipt_key_hashes: None,
+        receipt_stealth_hint: None,
+    };
+    let kernel = core::core::TxKernel {
+        features,
+        excess,
+        excess_sig,
+        receipt_claim: None,
+    };
+
+    let tx = core::core::Transaction::new(vec![input], vec![output], vec![kernel]);
+
+    // Must be rejected: a receipt input without auth requires a BobClaim kernel,
+    // but this is a Plain kernel.
+    let result = tx.validate(core::core::transaction::Weighting::AsTransaction);
+    assert!(
+        result.is_err(),
+        "Unauthorized Plain spend of a receipt output must be rejected"
+    );
+    assert!(
+        matches!(result.unwrap_err(), core::core::transaction::Error::InvalidReceiptClaim),
+        "Expected InvalidReceiptClaim"
+    );
+
+    clean_output_dir(".spend_attr_3c_unauth");
+}
+
+/// A transaction that mixes BobClaim and AliceSpend branches for the same
+/// receipt input must be rejected (a receipt input cannot have both a
+/// BobClaim kernel AND an AliceSpend authorization simultaneously).
+#[test]
+fn step3c_mixed_branch_rejected_in_chain() {
+    let fixture = ChainFixture::build(".spend_attr_3c_mixed");
+
+    // Build a BobClaim kernel (valid for the receipt).
+    let claim_fee = 2;
+    let dest_blind = key(fixture.secp());
+    let claim_tx = build_bob_claim_transaction(
+        &fixture.receipt_output,
+        fixture.receipt_value,
+        &fixture.bob_shared_blind,
+        &fixture.bob_receipt_key,
+        &dest_blind,
+        claim_fee,
+        fixture.secp(),
+    )
+    .unwrap();
+
+    // Now tamper: add an AliceSpend authorization to the receipt input
+    // alongside the BobClaim kernel. This is a mixed-branch violation.
+    let chain_id = {
+        let guard = global::CHAIN_TYPE.read();
+        ReceiptChainId::from_chain_type(&guard)
+    };
+    let bogus_auth = epic_core::core::receipt_claim::ReceiptSpendAuthorization::sign(
+        ReceiptPath::AliceSpend,
+        fixture.receipt_output.commit,
+        claim_tx.kernels()[0].excess,
+        claim_fee,
+        claim_tx.kernels()[0].hash(),
+        chain_id,
+        fixture.alice_authorization_key.secret_key(),
+    )
+    .unwrap();
+
+    // Rebuild the transaction with the tampered input.
+    let mut input = claim_tx.inputs()[0].to_owned();
+    input.receipt_spend_authorization = Some(bogus_auth);
+    let tampered_tx = core::core::Transaction::new(
+        vec![input],
+        claim_tx.outputs().to_vec(),
+        claim_tx.kernels().to_vec(),
+    );
+
+    // Must be rejected: a receipt input with AliceSpend auth cannot also
+    // be resolved by a BobClaim kernel.
+    let result = tampered_tx.validate(core::core::transaction::Weighting::AsTransaction);
+    assert!(
+        result.is_err(),
+        "Mixed-branch (BobClaim kernel + AliceSpend auth) must be rejected"
+    );
+    assert!(
+        matches!(result.unwrap_err(), core::core::transaction::Error::InvalidReceiptClaim),
+        "Expected InvalidReceiptClaim for mixed branch"
+    );
+
+    clean_output_dir(".spend_attr_3c_mixed");
 }
 

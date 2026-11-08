@@ -507,11 +507,10 @@ pub fn build_bob_claim_transaction(
 /// input carries a [`ReceiptSpendAuthorization`] signed with Alice's
 /// per-payment secret `a_i`.
 ///
-/// Consensus does not accept this transaction yet: the Alice-spend rule is
-/// still disabled, so `Transaction::validate` rejects it with
-/// `InvalidReceiptClaim`. The builder exists so the authorization construction
-/// and its binding to the final kernel can be tested and demonstrated ahead
-/// of the consensus change (Step 3C).
+/// The transaction passes consensus validation: `verify_receipt_resolution`
+/// accepts the Alice branch (authorization present, no matching BobClaim
+/// kernel), and `verify_receipt_spend_authorizations` cryptographically
+/// verifies the authorization against the kernel.
 pub fn build_alice_spend_transaction(
     receipt_output: &Output,
     receipt_value: u64,
@@ -2246,21 +2245,13 @@ mod step3b_tests {
             .any(|window| window == fixture.alice.secret_key().0));
     }
 
-    #[test]
-    fn alice_spend_is_rejected_only_by_the_disabled_consensus_rule() {
-        let fixture = spend_fixture();
-        let tx = build_alice(&fixture);
-
-        // Independently prove the transaction is otherwise valid.
-        TxKernel::batch_sig_verify(tx.kernels()).unwrap();
-        tx.verify_kernel_sums(tx.overage(), tx.offset.clone())
-            .unwrap();
-        tx.outputs()[0].verify_proof().unwrap();
-
-        crate::global::set_mining_mode(ChainTypes::UserTesting);
-        assert_eq!(
-            tx.validate(Weighting::AsTransaction),
-            Err(TxError::InvalidReceiptClaim)
-        );
-    }
+    // NOTE: the Step 3B test `alice_spend_is_rejected_only_by_the_disabled_consensus_rule`
+    // has been removed. It asserted that the Alice `Plain` spend is rejected by the
+    // old count rule in `verify_receipt_resolution()`. Step 3C replaces that rule
+    // with the two-branch matching rule and wires `verify_receipt_spend_authorizations`
+    // into `validate_read()`, so a correctly authorized Alice spend is now accepted.
+    // The acceptance case is covered by `step3c_valid_alice_spend_passes_validate_read`
+    // in `core/tests/transaction.rs` and by the chain-level E2E test
+    // `step3c_alice_reclaim_via_plain_kernel_consensus_accepted` in
+    // `chain/tests/spend_attribution.rs`.
 }

@@ -16,7 +16,7 @@
 
 use crate::core::hash::{DefaultHashable, Hashed};
 use crate::core::receipt_claim::{
-    ReceiptClaim, ReceiptPath, ReceiptSpendAuthorization, ReceiptStealthHint,
+    ReceiptChainId, ReceiptClaim, ReceiptPath, ReceiptSpendAuthorization, ReceiptStealthHint,
     SharedReceiptKeyHashes,
 };
 use crate::core::{committed, Committed};
@@ -840,10 +840,26 @@ impl TransactionBody {
     }
 
     // Verify that no input is spending an output from the same block.
-    // Assumes inputs and outputs are sorted
+    // Assumes inputs and outputs are sorted.
+    //
+    // Receipt inputs and outputs are explicitly excluded from cut-through.
+    // The receipt key hashes and stealth hints on receipt items make their
+    // hashes distinct from ordinary items with the same commitment, but
+    // the exclusion here is a consensus rule: receipt resolution evidence
+    // must never be cut, regardless of hash properties.
     fn verify_cut_through(&self) -> Result<(), Error> {
-        let mut inputs = self.inputs.iter().map(|x| x.hash()).peekable();
-        let mut outputs = self.outputs.iter().map(|x| x.hash()).peekable();
+        let mut inputs = self
+            .inputs
+            .iter()
+            .filter(|x| !x.features.is_receipt())
+            .map(|x| x.hash())
+            .peekable();
+        let mut outputs = self
+            .outputs
+            .iter()
+            .filter(|x| !x.features.is_receipt())
+            .map(|x| x.hash())
+            .peekable();
         while let (Some(ih), Some(oh)) = (inputs.peek(), outputs.peek()) {
             match ih.cmp(oh) {
                 Ordering::Less => {
@@ -897,17 +913,18 @@ impl TransactionBody {
 
     /// Validates receipt resolution rules for this transaction body.
     ///
-    /// **Step 3C note (deferred):** The current rule counts only `BobClaim`
-    /// kernels. A `Receipt` input that carries an Alice
-    /// [`ReceiptSpendAuthorization`](crate::receipt_claim::ReceiptSpendAuthorization)
-    /// alongside a `BobClaim` kernel would still satisfy this count rule.
-    /// Step 3C must add an explicit mixed-path rejection: a transaction may
-    /// not combine an Alice-authorized input with a `BobClaim` kernel.
+    /// Each `Receipt` input must be resolved by exactly one branch:
+    /// - **Bob path:** `receipt_spend_authorization` is `None` and exactly one
+    ///   `BobClaim` kernel references the input's commitment via
+    ///   `receipt_claim.original_commitment`, with `hashes.matches_bob()`
+    ///   confirming the claim's public key.
+    /// - **Alice path:** `receipt_spend_authorization` is `Some(auth)` and no
+    ///   `BobClaim` kernel references this input. The authorization's
+    ///   cryptographic verification is performed by
+    ///   [`verify_receipt_spend_authorizations`](Self::verify_receipt_spend_authorizations).
     ///
-    /// Similarly, multiple `Receipt` inputs with multiple kernels are not
-    /// matched one-to-one here; Step 3C must enforce a per-input/per-kernel
-    /// mapping to prevent duplicate kernel hashes, kernel substitution,
-    /// reordering, and authorization reuse.
+    /// A mixed assignment (Alice auth present AND a matching BobClaim kernel)
+    /// is unconditionally rejected.
     fn verify_receipt_resolution(&self) -> Result<(), Error> {
         for input in &self.inputs {
             let valid_metadata = match (
@@ -963,13 +980,39 @@ impl TransactionBody {
             .iter()
             .filter(|kernel| kernel.is_receipt_resolution())
             .collect();
+        let plain_kernels: Vec<&TxKernel> = self
+            .kernels
+            .iter()
+            .filter(|kernel| !kernel.is_receipt_resolution() && !kernel.features.is_coinbase())
+            .collect();
 
-        if receipt_inputs.len() != receipt_kernels.len() {
-            return Err(Error::InvalidReceiptClaim);
-        }
+        // Each receipt input must be resolved by exactly one of two branches:
+        //
+        //  Alice path:
+        //   - input.receipt_spend_authorization is Some(auth)
+        //   - auth.path == AliceSpend
+        //   - auth.original_commitment == input.commit
+        //   - hashes.matches_alice(&auth.alice_public_key)
+        //   - exactly one plain kernel (K_a) exists in the transaction with:
+        //       K_a.excess  == auth.kernel_excess
+        //       K_a.fee()   == auth.fee
+        //       K_a.hash()  == auth.kernel_hash
+        //
+        //  Bob path:
+        //   - input.receipt_spend_authorization is None
+        //   - exactly one BobClaim kernel (K_b) exists with:
+        //       K_b.receipt_claim.original_commitment == input.commit
+        //       hashes.matches_bob(&K_b.receipt_claim.receipt_public_key)
+        //
+        //  A receipt input with Some(authorization) must NOT be matched by a
+        //  BobClaim kernel, and a receipt input with None must NOT be matched
+        //  by the Alice path. Mixed branch assignment for the same input is
+        //  rejected unconditionally.
+        for input in &receipt_inputs {
+            let has_auth = input.receipt_spend_authorization.is_some();
+            let hashes = input.receipt_key_hashes.ok_or(Error::InvalidReceiptClaim)?;
 
-        for input in receipt_inputs {
-            let matches: Vec<&TxKernel> = receipt_kernels
+            let bob_matches: Vec<&TxKernel> = receipt_kernels
                 .iter()
                 .copied()
                 .filter(|kernel| {
@@ -980,19 +1023,118 @@ impl TransactionBody {
                         .unwrap_or(false)
                 })
                 .collect();
-            if matches.len() != 1 {
-                return Err(Error::InvalidReceiptClaim);
-            }
-            let claim = matches[0]
-                .receipt_claim
-                .as_ref()
-                .ok_or(Error::InvalidReceiptClaim)?;
-            let hashes = input.receipt_key_hashes.ok_or(Error::InvalidReceiptClaim)?;
-            if !hashes.matches_bob(&claim.receipt_public_key) {
-                return Err(Error::InvalidReceiptClaim);
+
+            let alice_kernel_matches: Vec<&TxKernel> = match input.receipt_spend_authorization {
+                Some(auth) => plain_kernels
+                    .iter()
+                    .copied()
+                    .filter(|kernel| {
+                        kernel.excess == auth.kernel_excess
+                            && kernel.features.fee() == auth.fee
+                            && kernel.hash() == auth.kernel_hash
+                    })
+                    .collect(),
+                None => vec![],
+            };
+
+            if has_auth {
+                // Alice path: exactly one matching plain kernel, no Bob claim
+                // must reference this input.
+                if !bob_matches.is_empty() {
+                    return Err(Error::InvalidReceiptClaim);
+                }
+                if alice_kernel_matches.len() != 1 {
+                    return Err(Error::InvalidReceiptClaim);
+                }
+                let auth = input
+                    .receipt_spend_authorization
+                    .ok_or(Error::InvalidReceiptClaim)?;
+                if auth.path != ReceiptPath::AliceSpend {
+                    return Err(Error::InvalidReceiptClaim);
+                }
+                if auth.original_commitment != input.commit {
+                    return Err(Error::InvalidReceiptClaim);
+                }
+                if !hashes.matches_alice(&auth.alice_public_key) {
+                    return Err(Error::InvalidReceiptClaim);
+                }
+            } else {
+                // Bob path: exactly one matching BobClaim kernel, no
+                // authorization carried on the input.
+                if alice_kernel_matches.len() != 0 {
+                    return Err(Error::InvalidReceiptClaim);
+                }
+                if bob_matches.len() != 1 {
+                    return Err(Error::InvalidReceiptClaim);
+                }
+                let claim = bob_matches[0]
+                    .receipt_claim
+                    .as_ref()
+                    .ok_or(Error::InvalidReceiptClaim)?;
+                if !hashes.matches_bob(&claim.receipt_public_key) {
+                    return Err(Error::InvalidReceiptClaim);
+                }
             }
         }
 
+        // No kernel (plain or BobClaim) may be used to resolve two different
+        // receipt inputs.
+        if receipt_kernels.len() > receipt_inputs.len() {
+            return Err(Error::InvalidReceiptClaim);
+        }
+
+        Ok(())
+    }
+
+    /// Verifies the Alice-spend authorizations carried on receipt inputs.
+    ///
+    /// For each receipt input with `receipt_spend_authorization = Some(auth)`,
+    /// this method:
+    /// 1. Derives the expected [`ReceiptChainId`] from the process-global
+    ///    `CHAIN_TYPE` (trusted chain context, not transaction-controlled data).
+    /// 2. Finds the unique plain kernel that `verify_receipt_resolution`
+    ///    already matched to this input (same excess, fee, and kernel hash).
+    /// 3. Calls `auth.verify_for_receipt_input(input, kernel, chain_id)`,
+    ///    which checks the Alice signature, the receipt-key hash commitment,
+    ///    and all field bindings.
+    ///
+    /// The kernel balance is independently proven by `verify_kernel_sums`
+    /// (called from `validate`); the authorization's `kernel_excess` binding
+    /// is a cross-check between the signature and the kernel, not a
+    /// substitute for the Mimblewimble sum proof.
+    fn verify_receipt_spend_authorizations(&self) -> Result<(), Error> {
+        let chain_type = crate::global::CHAIN_TYPE.read().clone();
+        let chain_id = ReceiptChainId::from_chain_type(&chain_type);
+
+        for input in &self.inputs {
+            if !input.features.is_receipt() {
+                continue;
+            }
+            let auth = match &input.receipt_spend_authorization {
+                Some(a) => a,
+                None => continue,
+            };
+            // Find the plain kernel that verify_receipt_resolution matched
+            // to this input (same excess, fee, kernel hash).
+            let matching_kernels: Vec<&TxKernel> = self
+                .kernels
+                .iter()
+                .filter(|k| {
+                    !k.is_receipt_resolution()
+                        && !k.features.is_coinbase()
+                        && k.excess == auth.kernel_excess
+                        && k.features.fee() == auth.fee
+                        && k.hash() == auth.kernel_hash
+                })
+                .collect();
+            let kernel = match matching_kernels.first() {
+                Some(k) => *k,
+                None => return Err(Error::InvalidReceiptClaim),
+            };
+            if !auth.verify_for_receipt_input(input, kernel, chain_id.clone()) {
+                return Err(Error::InvalidReceiptClaim);
+            }
+        }
         Ok(())
     }
 
@@ -1006,6 +1148,7 @@ impl TransactionBody {
         self.verify_cut_through()?;
         self.verify_receipt_feature_activation()?;
         self.verify_receipt_resolution()?;
+        self.verify_receipt_spend_authorizations()?;
         Ok(())
     }
 
@@ -1268,7 +1411,29 @@ impl Transaction {
 /// from the Vec. Provides a simple way to cut-through a block or aggregated
 /// transaction. The elimination is stable with respect to the order of inputs
 /// and outputs.
+///
+/// Receipt inputs and outputs are explicitly excluded from cut-through.
+/// Receipt resolution evidence (key hashes, stealth hints, spend
+/// authorizations) must never be cut, regardless of commitment overlap.
+/// Ordinary Mimblewimble cut-through behavior is preserved for all
+/// non-receipt items.
 pub fn cut_through(inputs: &mut Vec<Input>, outputs: &mut Vec<Output>) -> Result<(), Error> {
+    // Separate receipt items from ordinary items. Receipt items are
+    // preserved as-is and excluded from the cut-through comparison.
+    let receipt_inputs: Vec<Input> = inputs
+        .iter()
+        .filter(|x| x.features.is_receipt())
+        .cloned()
+        .collect();
+    let receipt_outputs: Vec<Output> = outputs
+        .iter()
+        .filter(|x| x.features.is_receipt())
+        .cloned()
+        .collect();
+    inputs.retain(|x| !x.features.is_receipt());
+    outputs.retain(|x| !x.features.is_receipt());
+
+    // Cut through ordinary items only.
     // assemble output commitments set, checking they're all unique
     outputs.sort_unstable();
     if outputs.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -1298,6 +1463,10 @@ pub fn cut_through(inputs: &mut Vec<Input>, outputs: &mut Vec<Output>) -> Result
     // Cut elements that have already been copied
     outputs.drain(outputs_idx - ncut..outputs_idx);
     inputs.drain(inputs_idx - ncut..inputs_idx);
+
+    // Reassemble: receipt items are appended (excluded from cut-through).
+    inputs.extend(receipt_inputs);
+    outputs.extend(receipt_outputs);
     Ok(())
 }
 
@@ -1440,12 +1609,11 @@ pub struct Input {
     /// spend an experimental receipt output. Carrying this on any other input
     /// is rejected at deserialization.
     ///
-    /// **Step 3C note:** The presence byte changes the `DefaultHashable` hash
-    /// of a `Receipt` input (both `None` and `Some` variants differ from the
-    /// pre-Step-3B hash). This incidentally breaks generic cut-through from
-    /// `Receipt` inputs to `Receipt` outputs. Step 3C must make cut-through
-    /// explicitly receipt-aware; Step 3B does not rely on this accidental
-    /// hash difference for security.
+    /// The presence byte changes the `DefaultHashable` hash of a `Receipt`
+    /// input. Cut-through explicitly excludes receipt items (see
+    /// [`cut_through`](crate::core::transaction::cut_through) and
+    /// [`verify_cut_through`](TransactionBody::verify_cut_through)), so the
+    /// hash difference is not relied upon for security.
     pub receipt_spend_authorization: Option<ReceiptSpendAuthorization>,
 }
 
