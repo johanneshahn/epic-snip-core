@@ -301,7 +301,7 @@ impl Peers {
 				// Stoppe die Verbindung zum Peer
 				peer.stop();
 
-				// Setze den Zeitstempel für "zuletzt gesehen" zurück
+				// Reset the "last seen" timestamp
 				let mut live_info = peer.info.live_info.write();
 				live_info.last_seen = Utc::now();
 

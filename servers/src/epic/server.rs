@@ -329,10 +329,10 @@ impl Server {
 				"Starting TOR Process for send at {:?}",
 				config.tor.socks_proxy_addr
 			);
-			// Schreibe die torrc-Konfiguration für den Hidden Service
+			// Write the torrc configuration for the hidden service
 			let torrc_path = format!("{}/torrc", tor_dir);
 
-			// Erzeuge Hidden Service für den Node (Port 3414)
+			// Create hidden service for the node (port 3414)
 			match crate::p2p::tor::config::output_tor_listener_config_auto(
 				&tor_dir,
 				&config.api_http_addr, // Use node address from config

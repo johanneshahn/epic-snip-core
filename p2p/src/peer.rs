@@ -150,7 +150,7 @@ impl Peer {
 		match info {
 			Ok(info) => {
 				let peer = Peer::new(info, conn, adapter)?;
-				// Wenn der Peer ONIONSTEM unterstützt und wir eine Onion-Adresse haben, sende sie
+				// If the peer supports ONIONSTEM and we have an onion address, send it
 				if peer.info.capabilities.contains(Capabilities::ONIONSTEM) {
 					debug!(
 						"connect: sending onion address request to peer {:?}",

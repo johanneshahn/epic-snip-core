@@ -852,7 +852,7 @@ mod tests {
 
 	#[test]
 	fn test_ban_reason_serialization() {
-		// Test für alle Varianten von ReasonForBan
+		// Test for all ReasonForBan variants
 		let reasons = vec![
 			ReasonForBan::None,
 			ReasonForBan::BadBlock,
@@ -877,15 +877,15 @@ mod tests {
 			let mut bin_reader = ser::BinReader::new(&mut reader, ProtocolVersion::local());
 			let deserialized_ban_reason = BanReason::read(&mut bin_reader).unwrap();
 
-			// Überprüfen, ob der ursprüngliche und der deserialisierte Wert übereinstimmen
+			// Check that the original and deserialized values match
 			assert_eq!(ban_reason.ban_reason, deserialized_ban_reason.ban_reason);
 		}
 	}
 
 	#[test]
 	fn test_invalid_ban_reason_deserialization() {
-		// Test für ungültige Werte
-		let invalid_bytes = vec![255, 0, 0, 0]; // Ein Wert, der keiner gültigen ReasonForBan-Variante entspricht
+		// Test for invalid values
+		let invalid_bytes = vec![255, 0, 0, 0]; // A value that does not correspond to a valid ReasonForBan variant
 		let mut reader = &invalid_bytes[..];
 
 		let mut bin_reader = ser::BinReader::new(&mut reader, ProtocolVersion::local());

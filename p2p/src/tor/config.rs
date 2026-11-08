@@ -206,7 +206,7 @@ pub fn output_tor_listener_config_auto(
 	// create data directory if it doesn't exist
 	fs::create_dir_all(&tor_data_dir)?;
 
-	// Erzeuge Hidden Service Verzeichnis (ohne Schlüssel)
+	// Create hidden service directory (without keys)
 	let service_dir = output_onion_service_config_auto(tor_config_directory)?;
 
 	// Schreibe torrc
@@ -256,7 +256,7 @@ pub fn complete_tor_address(input: &str) -> Result<String, Error> {
 }
 
 pub fn output_onion_service_config_auto(tor_config_directory: &str) -> Result<String, Error> {
-	// Erzeuge einen zufälligen Verzeichnisnamen für den Hidden Service
+	// Generate a random directory name for the hidden service
 	use rand::distr::Alphanumeric;
 	use rand::Rng;
 	let mut rng = rand::rng();
@@ -271,10 +271,10 @@ pub fn output_onion_service_config_auto(tor_config_directory: &str) -> Result<St
 		tor_config_directory, MAIN_SEPARATOR, HIDDEN_SERVICES_DIR, MAIN_SEPARATOR, address
 	);
 
-	// Lege das Verzeichnis an (ohne Schlüsseldateien)
+	// Create the directory (without key files)
 	fs::create_dir_all(&hs_dir_file_path)?;
 
-	// Tor erzeugt die Schlüssel beim Start selbst!
+	// Tor generates the keys itself on startup!
 	Ok(address)
 }
 

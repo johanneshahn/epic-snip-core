@@ -288,7 +288,7 @@ mod tests {
 		let ban_reason = ReasonForBan::BadBlock;
 		let db_root = tempfile::tempdir().unwrap();
 
-		// Erstelle einen PeerStore und füge einen Peer hinzu
+		// Create a PeerStore and add a peer
 		let peer_store = PeerStore::new(db_root.path().to_str().unwrap()).unwrap();
 		let peer_data = PeerData {
 			addr: peer_addr.clone(),
@@ -307,7 +307,7 @@ mod tests {
 			.update_ban_reason(peer_addr.clone(), ban_reason)
 			.unwrap();
 
-		// Überprüfe, ob der Bann-Grund korrekt gespeichert wurde
+		// Check that the ban reason was stored correctly
 		let updated_peer = peer_store.get_peer(peer_addr).unwrap();
 		assert_eq!(updated_peer.ban_reason, ban_reason);
 		assert_eq!(updated_peer.flags, State::Banned);
