@@ -26,6 +26,7 @@ regex = "1"
 
 epic_core = { path = "../core", version = "4.1.2" }
 epic_keychain = { path = "../keychain", version = "4.1.2" }
+epic_snip_wallet = { path = "../snip-wallet", version = "4.1.2" }
 epic_store = { path = "../store", version = "4.1.2" }
 epic_util = { path = "../util", version = "4.1.2" }
 

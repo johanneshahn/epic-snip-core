@@ -35,6 +35,7 @@ use epic_util as util;
 mod chain;
 mod error;
 pub mod pipe;
+pub mod snip;
 pub mod store;
 pub mod txhashset;
 pub mod types;

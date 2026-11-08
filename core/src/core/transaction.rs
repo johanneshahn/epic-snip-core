@@ -905,7 +905,10 @@ impl TransactionBody {
         let uses_receipt_features = self.inputs.iter().any(|x| x.features.is_receipt())
             || self.outputs.iter().any(|x| x.features.is_receipt())
             || self.kernels.iter().any(TxKernel::is_receipt_resolution);
-        if uses_receipt_features && !global::is_user_testing_mode() {
+        if uses_receipt_features
+            && !global::is_user_testing_mode()
+            && !global::is_automated_testing_mode()
+        {
             return Err(Error::InvalidKernelFeatures);
         }
         Ok(())

@@ -1230,6 +1230,7 @@ dependencies = [
  "env_logger",
  "epic_core",
  "epic_keychain",
+ "epic_snip_wallet",
  "epic_store",
  "epic_util",
  "lazy_static",
@@ -1404,6 +1405,22 @@ dependencies = [
  "walkdir",
  "webpki",
  "webpki-roots",
+]
+
+[[package]]
+name = "epic_snip_wallet"
+version = "4.1.2"
+dependencies = [
+ "epic_core",
+ "epic_keychain",
+ "epic_util",
+ "fs2",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
