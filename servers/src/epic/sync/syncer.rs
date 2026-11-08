@@ -619,7 +619,7 @@ impl SyncRunner {
 
 			match self.sync_state.status() {
 				SyncStatus::Compacting => {
-					// Während der Kompaktierung keine anderen Prozesse ausführen
+					// Do not run other processes during compaction
 					thread::sleep(time::Duration::from_secs(1));
 					continue;
 				}
