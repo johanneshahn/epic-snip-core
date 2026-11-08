@@ -522,6 +522,137 @@ fn alice_seed_only_without_descriptor_limitation() {
 // ─── Wrong seed, key reuse, duplicate scans ──────────────────────────────────
 
 #[test]
+fn privacy_audit_descriptor_reuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let alice_kc = keychain(0xA1);
+    let chain = setup_chain(".snip_wallet_recovery_privacy_audit", &alice_kc);
+    let view = TestChain { chain: &chain };
+
+    // Two different Bobs with different descriptors.
+    let bob_a_kc = keychain(0xB0);
+    let bob_b_kc = keychain(0xB1);
+    let desc_a = epic_snip_wallet::bob_secrets(&bob_a_kc)
+        .unwrap()
+        .descriptor(bob_a_kc.secp())
+        .unwrap();
+    let desc_b = epic_snip_wallet::bob_secrets(&bob_b_kc)
+        .unwrap()
+        .descriptor(bob_b_kc.secp())
+        .unwrap();
+
+    // Alice creates 3 Receipts to Bob A and 3 to Bob B.
+    let mut alice = open_wallet(0xA1, dir.path().join("alice.json"));
+    for _ in 0..3 {
+        fund_payment(&chain, &alice_kc, &mut alice, &desc_a, 2);
+    }
+    for _ in 0..3 {
+        fund_payment(&chain, &alice_kc, &mut alice, &desc_b, 2);
+    }
+
+    // Collect public Receipt output fields from the chain.
+    let mut receipt_fields: Vec<(String, String, String, String)> = Vec::new();
+    for height in 0..=view.tip_height() {
+        if let Some(block) = view.block_at_height(height) {
+            for output in block.outputs() {
+                if output.features.is_receipt() {
+                    let commit = epic_util::to_hex(output.commit.0.to_vec());
+                    let hint = output
+                        .receipt_stealth_hint
+                        .map(|h| epic_util::to_hex(h.ephemeral_public_key.to_vec()))
+                        .unwrap_or_default();
+                    let bob_hash = output
+                        .receipt_key_hashes
+                        .map(|h| epic_util::to_hex(h.bob.to_vec()))
+                        .unwrap_or_default();
+                    let alice_hash = output
+                        .receipt_key_hashes
+                        .map(|h| epic_util::to_hex(h.alice.to_vec()))
+                        .unwrap_or_default();
+                    receipt_fields.push((commit, hint, bob_hash, alice_hash));
+                }
+            }
+        }
+    }
+
+    // Verify: no two Receipts share the same hint (ephemeral key).
+    let mut hints: Vec<&String> = receipt_fields.iter().map(|r| &r.1).collect();
+    hints.sort();
+    for i in 1..hints.len() {
+        assert_ne!(hints[i - 1], hints[i], "duplicate hint found");
+    }
+
+    // Verify: no two Receipts share the same bob hash.
+    let mut bob_hashes: Vec<&String> = receipt_fields.iter().map(|r| &r.2).collect();
+    bob_hashes.sort();
+    for i in 1..bob_hashes.len() {
+        assert_ne!(bob_hashes[i - 1], bob_hashes[i], "duplicate bob hash found");
+    }
+
+    // Verify: no two Receipts share the same commit.
+    let mut commits: Vec<&String> = receipt_fields.iter().map(|r| &r.0).collect();
+    commits.sort();
+    for i in 1..commits.len() {
+        assert_ne!(commits[i - 1], commits[i], "duplicate commit found");
+    }
+
+    // Verify: total count is 6 (3 to A + 3 to B).
+    assert_eq!(receipt_fields.len(), 6);
+
+    // Bob A claims 2 Receipts, Bob B claims 1.
+    let view = TestChain { chain: &chain };
+    let mut bob_a = open_wallet(0xB0, dir.path().join("bob_a.json"));
+    bob_a.register_descriptor(&desc_a).unwrap();
+    bob_a.scan_incoming(&view, 0, view.tip_height()).unwrap();
+    assert_eq!(incoming_records(&bob_a).len(), 3);
+
+    let mut bob_b = open_wallet(0xB1, dir.path().join("bob_b.json"));
+    bob_b.register_descriptor(&desc_b).unwrap();
+    bob_b.scan_incoming(&view, 0, view.tip_height()).unwrap();
+    assert_eq!(incoming_records(&bob_b).len(), 3);
+
+    // Claim by Bob A.
+    let rec_a0 = incoming_records(&bob_a)[0].clone();
+    let dest_a = bob_a.destination_blind(ROLE_BOB, 0).unwrap();
+    let claim_a0 = bob_a
+        .build_bob_claim(&rec_a0.payment_id, &dest_a, 2)
+        .unwrap();
+    mine_block_with_txs(&chain, &alice_kc, vec![&claim_a0], 1);
+
+    // Claim by Bob B.
+    let rec_b0 = incoming_records(&bob_b)[0].clone();
+    let dest_b = bob_b.destination_blind(ROLE_BOB, 0).unwrap();
+    let claim_b0 = bob_b
+        .build_bob_claim(&rec_b0.payment_id, &dest_b, 2)
+        .unwrap();
+    mine_block_with_txs(&chain, &alice_kc, vec![&claim_b0], 1);
+
+    // Now verify: after claims, the BobClaim public keys are all distinct.
+    let mut claim_pubkeys: Vec<String> = Vec::new();
+    for height in 0..=view.tip_height() {
+        if let Some(block) = view.block_at_height(height) {
+            // Access kernels through the block's transactions.
+            // We check the block's transaction kernels.
+            for kernel in block.kernels() {
+                if let Some(claim) = &kernel.receipt_claim {
+                    let secp = epic_util::secp::Secp256k1::with_caps(epic_util::secp::ContextFlag::Commit);
+                    claim_pubkeys.push(epic_util::to_hex(
+                        claim.receipt_public_key.serialize_vec(&secp, true).to_vec(),
+                    ));
+                }
+            }
+        }
+    }
+    // Verify all claim pubkeys are distinct.
+    let mut sorted_pk = claim_pubkeys.clone();
+    sorted_pk.sort();
+    for i in 1..sorted_pk.len() {
+        assert_ne!(sorted_pk[i - 1], sorted_pk[i], "duplicate claim pubkey found");
+    }
+    // We should have 2 claims.
+    assert_eq!(claim_pubkeys.len(), 2);
+}
+
+#[test]
 fn adapter_smoke_test() {
     let dir = tempfile::tempdir().unwrap();
     let alice_kc = keychain(0xA1);
